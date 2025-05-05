@@ -1,3 +1,11 @@
+"""
+Ultrasonic Security System for Raspberry Pi
+
+This script detects motion using an HC-SR04 ultrasonic sensor.
+When significant distance changes are detected, it saves timestamped camera captures
+in daily folders.
+"""
+
 import cv2
 import os
 import time
@@ -6,29 +14,38 @@ from collections import deque
 from picamera2 import Picamera2
 import RPi.GPIO as GPIO
 
-# Hardware Configuration
-TRIG_PIN = 23
-ECHO_PIN = 24
-CAMERA_ROTATION = cv2.ROTATE_180
-SAVE_DIR = os.path.expanduser("~/Security_Captures")
+# ==============================
+# CONFIGURATION SETTINGS
+# ==============================
 
-# Detection Parameters
-DISTANCE_THRESHOLD = 25
-COOLDOWN_PERIOD = 7
-READING_WINDOW = 5
-STABILIZATION_READINGS = 10
+# Hardware setup
+TRIG_PIN = 23      # GPIO pin for TRIG sensor
+ECHO_PIN = 24      # GPIO pin for ECHO sensor
+CAMERA_ROTATION = cv2.ROTATE_180  # Camera orientation correction
+SAVE_FOLDER = os.path.expanduser("~/Ultrasonic_Motions")  # Main storage directory
 
-# UI Configuration (BGR color format)
-UI_SCALE = 1.0
-FONT = cv2.FONT_HERSHEY_SIMPLEX
+# Detection parameters
+DISTANCE_THRESHOLD = 25    # Minimum distance change for detection (cm)
+COOLDOWN_TIME = 7          # Minimum time between detections (seconds)
+MEASUREMENT_WINDOW = 5     # Number of measurements for analysis
+STABILIZATION_SAMPLES = 10 # Initial measurements for calibration
+
+# Interface settings
+UI_SCALE = 1.0            # UI elements scale
+FONT = cv2.FONT_HERSHEY_SIMPLEX  # Font type
 COLORS = {
-    'background': (40, 40, 40),    # Dark gray
-    'text': (200, 200, 200),       # White
-    'alert': (0, 0, 255),          # Red (BGR format)
-    'status': (100, 100, 100)      # Gray
+    'background': (40, 40, 40),   # Dark gray background
+    'text': (200, 200, 200),      # White text
+    'alert': (0, 0, 255),         # Red alert (BGR format)
+    'status': (100, 100, 100)     # Gray status bar
 }
 
+# ==============================
+# HELPER FUNCTIONS
+# ==============================
+
 def setup_gpio():
+    """Initializes GPIO pins for ultrasonic sensor."""
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(TRIG_PIN, GPIO.OUT)
     GPIO.setup(ECHO_PIN, GPIO.IN)
@@ -36,57 +53,78 @@ def setup_gpio():
     time.sleep(1)
 
 def initialize_camera():
-    picam2 = Picamera2()
+    """Starts Raspberry Pi camera and returns camera object."""
     try:
-        config = picam2.create_preview_configuration(
+        camera = Picamera2()
+        config = camera.create_preview_configuration(
             main={"size": (640, 480), "format": "RGB888"})
-        picam2.configure(config)
-        picam2.start()
-        time.sleep(2)
-        return picam2
-    except Exception as e:
-        print(f"Camera initialization failed: {e}")
+        camera.configure(config)
+        camera.start()
+        time.sleep(2)  # Allow camera initialization
+        return camera
+    except Exception as error:
+        print(f"Camera initialization error: {error}")
         return None
 
-def get_distance():
-    """Returns distance in cm (2-400cm) or None for invalid readings"""
+def measure_distance():
+    """
+    Measures distance using HC-SR04.
+    Returns:
+        float: Distance in centimeters (2-400 cm)
+        None: For invalid measurements
+    """
     try:
+        # Generate ultrasonic pulse
         GPIO.output(TRIG_PIN, True)
         time.sleep(0.00001)
         GPIO.output(TRIG_PIN, False)
 
-        pulse_start = time.time()
-        timeout = pulse_start + 0.04
+        # Measure echo return time
+        start_time = time.time()
+        timeout = start_time + 0.04  # Maximum measurement duration
 
+        # Wait for echo pulse start
         while GPIO.input(ECHO_PIN) == 0:
-            pulse_start = time.time()
-            if pulse_start > timeout:
+            start_time = time.time()
+            if start_time > timeout:
                 return None
 
-        pulse_end = time.time()
+        # Measure echo pulse end
+        end_time = time.time()
         while GPIO.input(ECHO_PIN) == 1:
-            pulse_end = time.time()
-            if pulse_end > timeout:
+            end_time = time.time()
+            if end_time > timeout:
                 return None
 
-        distance = (pulse_end - pulse_start) * 17150
+        # Calculate distance
+        distance = (end_time - start_time) * 17150
         return round(distance, 1) if 2 < distance < 400 else None
-    except Exception as e:
-        print(f"Distance measurement error: {e}")
+    except Exception as error:
+        print(f"Measurement error: {error}")
         return None
 
-def draw_interface(frame, distance, last_capture):
+def create_interface(frame, distance, last_capture):
+    """
+    Renders user interface onto the frame.
+    Parameters:
+        frame (np.array): Input image frame
+        distance (float): Current measured distance
+        last_capture (str): Time of last detection
+    Returns:
+        np.array: Frame with rendered UI
+    """
     if frame is None:
         return None
         
     try:
         # Header
         cv2.rectangle(frame, (0, 0), (frame.shape[1], 40), COLORS['background'], -1)
-        cv2.putText(frame, "Ultrasonic Motion Detection System", (10, 30), 
+        cv2.putText(frame, "Ultrasonic Security System", (10, 30), 
                    FONT, 0.8*UI_SCALE, COLORS['text'], 1)
 
         # Status bar
-        status_text = f"Current: {distance}cm | Last trigger: {last_capture} | press 'q' to leave" if distance else "Initializing..."
+        status_text = (f"Current: {distance}cm | Last detection: {last_capture} | "
+                       "Press 'q' to quit") if distance else "Initializing..."
         cv2.rectangle(frame, (0, frame.shape[0]-40), (frame.shape[1], frame.shape[0]), 
                       COLORS['status'], -1)
         cv2.putText(frame, status_text, (10, frame.shape[0]-10), 
@@ -96,120 +134,134 @@ def draw_interface(frame, distance, last_capture):
         cv2.putText(frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
                    (10, frame.shape[0]-60), FONT, 0.5*UI_SCALE, COLORS['text'], 1)
         return frame
-    except Exception as e:
-        print(f"Interface drawing error: {e}")
+    except Exception as error:
+        print(f"UI rendering error: {error}")
         return None
 
+# ==============================
+# MAIN PROGRAM LOOP
+# ==============================
+
 def main():
+    # Hardware initialization
     setup_gpio()
     
-    # Initialize camera with retry logic
-    cam = None
+    # Camera startup with retries
+    camera = None
     for _ in range(3):
-        cam = initialize_camera()
-        if cam is not None:
+        camera = initialize_camera()
+        if camera is not None:
             break
         time.sleep(1)
     
-    if cam is None:
+    if camera is None:
         print("Failed to initialize camera after 3 attempts")
         return
 
+    # Create main save directory
     try:
-        os.makedirs(SAVE_DIR, exist_ok=True)
-        os.chmod(SAVE_DIR, 0o755)
-    except Exception as e:
-        print(f"Directory error: {e}")
+        os.makedirs(SAVE_FOLDER, exist_ok=True)
+        os.chmod(SAVE_FOLDER, 0o755)
+    except Exception as error:
+        print(f"Directory creation error: {error}")
         return
 
-    readings = deque(maxlen=READING_WINDOW)
-    last_capture = 0
-    stable_count = 0
+    # Initialize variables
+    measurements = deque(maxlen=MEASUREMENT_WINDOW)
+    last_capture_time = 0
+    stabilization_count = 0
 
-    # Discard initial unstable readings
-    while stable_count < STABILIZATION_READINGS:
-        if get_distance() is not None:
-            stable_count += 1
+    # Calibration phase
+    while stabilization_count < STABILIZATION_SAMPLES:
+        if measure_distance() is not None:
+            stabilization_count += 1
         time.sleep(0.1)
 
     try:
         while True:
-            current_distance = get_distance()
-            now = time.time()
+            current_distance = measure_distance()
+            current_time = time.time()
             
-            # Capture frame with error handling
+            # Capture camera frame
             try:
-                frame = cam.capture_array()
+                frame = camera.capture_array()
                 if frame is None:
                     raise RuntimeError("Received empty frame")
                 
-                # Rotate
+                # Adjust frame orientation
                 frame = cv2.rotate(frame, CAMERA_ROTATION)
                 
                 if frame is None:
-                    raise RuntimeError("Frame processing failed")
-            except Exception as e:
-                print(f"Frame capture error: {e}")
+                    raise RuntimeError("Frame processing error")
+            except Exception as error:
+                print(f"Frame capture error: {error}")
                 time.sleep(1)
                 continue
 
             processed_frame = None
             if current_distance is not None:
-                readings.append(current_distance)
+                measurements.append(current_distance)
                 
-                # Create safe copy for drawing
+                # Create UI copy
                 try:
                     frame_copy = frame.copy()
-                except AttributeError as e:
-                    print(f"Frame copy error: {e}")
+                except AttributeError as error:
+                    print(f"Frame copy error: {error}")
                     continue
                 
-                # Draw interface
-                processed_frame = draw_interface(
+                # Render interface
+                processed_frame = create_interface(
                     frame_copy,
                     current_distance,
-                    datetime.fromtimestamp(last_capture).strftime("%H:%M:%S") if last_capture else "None"
+                    datetime.fromtimestamp(last_capture_time).strftime("%H:%M:%S") if last_capture_time else "None"
                 )
 
-                if len(readings) >= READING_WINDOW and (now - last_capture) > COOLDOWN_PERIOD:
-                    avg_change = abs(readings[-1] - readings[0])
+                # Motion detection
+                if len(measurements) >= MEASUREMENT_WINDOW and (current_time - last_capture_time) > COOLDOWN_TIME:
+                    avg_change = abs(measurements[-1] - measurements[0])
                     
                     if avg_change > DISTANCE_THRESHOLD:
                         try:
-                            filename = f"alert_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                            # Save original frame (already converted to BGR)
-                            cv2.imwrite(os.path.join(SAVE_DIR, filename), frame)
-                            print(f"Alert! {avg_change}cm change detected. Image saved.")
-                            last_capture = now
-                            readings.clear()
-                        except Exception as e:
-                            print(f"Save error: {e}")
-# red filter when change is detected
-                      #  try:
-                      #      overlay = processed_frame.copy()
-                      #      cv2.rectangle(overlay, (0,0), (processed_frame.shape[1], processed_frame.shape[0]), 
-                      #                  COLORS['alert'], -1)
-                      #      cv2.addWeighted(overlay, 0.2, processed_frame, 0.8, 0, processed_frame)
-                      #  except Exception as e:
-                      #      print(f"Overlay error: {e}")
+                            # Get current timestamp once
+                            now = datetime.now()
+                            
+                            # Create daily directory
+                            date_folder = now.strftime("%Y-%m-%d")
+                            daily_path = os.path.join(SAVE_FOLDER, date_folder)
+                            os.makedirs(daily_path, exist_ok=True)
+                            
+                            # Generate filename
+                            filename = f"ultrasonic_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
+                            full_path = os.path.join(daily_path, filename)
+                            
+                            # Save image
+                            cv2.imwrite(full_path, frame)
+                            print(f"Alert! Detected {avg_change}cm change. Image saved at {full_path}")
+                            
+                            # Update last capture time and clear measurements
+                            last_capture_time = current_time
+                            measurements.clear()
+                        except Exception as error:
+                            print(f"Save error: {error}")
 
-            # Display handling
+            # Display window
             try:
                 if processed_frame is not None:
                     cv2.namedWindow("Monitor", cv2.WND_PROP_FULLSCREEN)
                     cv2.setWindowProperty("Monitor", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
                     cv2.imshow("Monitor", processed_frame)
-            except Exception as e:
-                print(f"Display error: {e}")
+            except Exception as error:
+                print(f"Display error: {error}")
 
+            # Exit on 'q' key press
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
             time.sleep(0.1)
 
     finally:
-        if cam is not None:
-            cam.stop()
+        if camera is not None:
+            camera.stop()
         GPIO.cleanup()
         cv2.destroyAllWindows()
 
